@@ -1,0 +1,28 @@
+runner:
+  num_steps_per_env: 48
+  save_interval: 10
+
+  obs_groups:
+    actor: ["policy", "image"]
+    critic: ["policy", "image"]
+
+  algorithm:
+    class_name: PPO
+
+  actor:
+    class_name: CNNModel
+    obs_normalization: true
+    cnn_cfg:
+      output_channels: [32, 64, 128]
+      kernel_size: [8, 4, 3]
+      stride: [4, 2, 1]
+    distribution_cfg:
+      class_name: GaussianDistribution
+
+  critic:
+    class_name: CNNModel
+    obs_normalization: true
+    cnn_cfg:
+      output_channels: [32, 64, 128]
+      kernel_size: [8, 4, 3]
+      stride: [4, 2, 1]
