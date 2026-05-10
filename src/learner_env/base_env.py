@@ -9,7 +9,7 @@ from genesis.utils.geom import transform_by_quat, inv_quat
 import random
 from src.generator import DomainRandomization
 from src.utils import Sliders
-
+from tensordict import TensorDict
 
 class WalkENV(gym.Env):
 
@@ -55,6 +55,7 @@ class WalkENV(gym.Env):
                 tolerance=1e-5,
                 # max_collision_pairs=20,
             ),
+            renderer=gs.renderers.BatchRenderer(use_rasterizer=True),
             show_viewer=render)
         
         if plane:
@@ -91,7 +92,7 @@ class WalkENV(gym.Env):
 
         # Adding Camera
         self.cam_forward = self.scene.add_camera(
-            res=(64, 64),
+            res=(640, 480),
             pos=(0, 0.0, 0),
             lookat=(10, 0, 0),
             fov=120,
@@ -99,14 +100,16 @@ class WalkENV(gym.Env):
             near = 0.01,
         )
         
-        offset_T_forward = np.eye(4)
-        offset_T_forward[0, 3] = 1
-        offset_T_forward[1, 3] = 0.0
-        offset_T_forward[2, 3] = 0.5
-        r = Rotation.from_euler('z', -90, degrees=True)
-        offset_T_forward[:3, :3] = r.as_matrix()
-        self.cam_forward.attach(rigid_link=self.robot.get_link("base"), offset_T=offset_T_forward)
-        self.cam_sliders_forward = Sliders(values=[0.22, 0, 0.4, 78, -3, -99])
+        self.offset_T_forward = np.eye(4)
+        self.offset_T_forward[0, 3] = 0.31 #x
+        self.offset_T_forward[1, 3] = 0.0  #y
+        self.offset_T_forward[2, 3] = 0.15 #z
+
+        r = Rotation.from_euler('xyz', [74, 0, -90], degrees=True)
+        self.offset_T_forward[:3, :3] = r.as_matrix()
+
+        self.cam_forward.attach(rigid_link=self.robot.get_link("base"), offset_T=self.offset_T_forward)
+        # self.cam_sliders_forward = Sliders(values=[0.31, 0, 0.15, 74, 0, -90])
         self.depth_img = None
 
         # self.cam_foot = self.scene.add_camera(
@@ -252,12 +255,12 @@ class WalkENV(gym.Env):
             "torque_penalty": torch.zeros(self.num_envs, dtype=torch.float, device=self.device),
             "joint_vel_penalty" : torch.zeros(self.num_envs, dtype=torch.float, device=self.device),
             "out_of_range_penalty": torch.zeros(self.num_envs, dtype=torch.float, device=self.device),
-            "feet_air_time": torch.zeros(self.num_envs, dtype=torch.float, device=self.device),
-            "foot_slip_penalty": torch.zeros(self.num_envs, dtype=torch.float, device=self.device),
-            "swing_phase_penalty": torch.zeros(self.num_envs, dtype=torch.float, device=self.device),
-            "stance_phase_penalty": torch.zeros(self.num_envs, dtype=torch.float, device=self.device),
-            "foot_swing_height_penalty": torch.zeros(self.num_envs, dtype=torch.float, device=self.device),
-            "raibert_penalty": torch.zeros(self.num_envs, dtype=torch.float, device=self.device),
+            # "feet_air_time": torch.zeros(self.num_envs, dtype=torch.float, device=self.device),
+            # "foot_slip_penalty": torch.zeros(self.num_envs, dtype=torch.float, device=self.device),
+            # "swing_phase_penalty": torch.zeros(self.num_envs, dtype=torch.float, device=self.device),
+            # "stance_phase_penalty": torch.zeros(self.num_envs, dtype=torch.float, device=self.device),
+            # "foot_swing_height_penalty": torch.zeros(self.num_envs, dtype=torch.float, device=self.device),
+            # "raibert_penalty": torch.zeros(self.num_envs, dtype=torch.float, device=self.device),
             "reward_survival" : torch.zeros(self.num_envs, dtype=torch.float, device=self.device),
             "Reward_Per_Environment": torch.zeros(self.num_envs, dtype=torch.float, device=self.device),
         }
@@ -468,9 +471,14 @@ class WalkENV(gym.Env):
         return reward, terminated, out_of_trajectory
 
     def get_observations(self):
-        self.extras["observations"]["critic"] = self.obs_buf
-        return self.obs_buf, self.extras
-    
+        obs_buf = self._get_obs()
+        return TensorDict(
+        {
+            "policy": obs_buf["policy"],
+            "image": obs_buf["image"],
+        },
+        batch_size=self.num_envs)
+
     def get_privileged_observations(self):
         return None
 
@@ -494,8 +502,11 @@ class WalkENV(gym.Env):
             self.custom_commands[:, 1] * 0.5,
         ], dim=1)
 
-        current_obs = {
-            "numerical": torch.cat([
+        _, depth_img, _, _ = self.cam_forward.render(depth=True)
+        print(torch.tensor(depth_img, dtype=torch.float32).unsqueeze(1).shape)
+
+        current_obs = TensorDict({          
+            "policy": torch.cat([
             self.base_lin_vel_body,                        # 3 
             self.base_ang_vel * 0.5,                       # 3
             projected_gravity ,                       # 3
@@ -504,8 +515,10 @@ class WalkENV(gym.Env):
             self.actions,                             # 12
             scaled_commands,                          # 3
             ], dim=1),
-            "camera": self.cam_forward.render(depth=True) # 64x64
-        }
+            "image": torch.tensor(depth_img, dtype=torch.float32).unsqueeze(1) # n_envs x 1 x 64 x 64
+        }, batch_size=self.num_envs, device=self.device)
+
+        print(current_obs["image"].shape)
 
         # Add history of observations
         # self.obs_histoy[:, :-self.num_obs] = self.obs_histoy[:, self.num_obs:].clone()
@@ -565,10 +578,10 @@ class WalkENV(gym.Env):
    
     def update_cam(self):
         
-        offset_T_forward = self.cam_sliders_forward.update_values()
+        # offset_T_forward = self.cam_sliders_forward.update_values()
 
         base_link = self.robot.get_link("base")
-        self.cam_forward.attach(base_link, offset_T_forward)
+        self.cam_forward.attach(base_link, self.offset_T_forward)
         self.cam_forward.move_to_attach()
 
         self.depth_img, seg, col_seg, normal = self.cam_forward.render(rgb=False, depth=True, segmentation=False, colorize_seg=False, normal=False) 
