@@ -92,11 +92,11 @@ class WalkENV(gym.Env):
 
         # Adding Camera
         self.cam_forward = self.scene.add_camera(
-            res=(640, 480),
+            res=(64, 64),
             pos=(0, 0.0, 0),
             lookat=(10, 0, 0),
             fov=120,
-            GUI=True,
+            GUI=False,
             near = 0.01,
         )
         
@@ -204,23 +204,67 @@ class WalkENV(gym.Env):
         self.second_last_actions = torch.zeros_like(self.actions)
         self.last_dof_vel = torch.zeros((self.num_envs, 12))
 
+        # Actual Joint Limits given in the Unitree Go2 specification.
+        self.actual_joint_limits = torch.deg2rad(
+            torch.tensor([
+                (-48, 48), 
+                (-48, 48),
+                (-48, 48), 
+                (-48, 48), 
+
+                (-90, 200), 
+                (-90, 200), 
+
+                (-30, 260), 
+                (-30, 260), 
+
+                (-156, -48), 
+                (-156, -48), 
+                (-156, -48), 
+                (-156, -48)
+            ])
+        )
+
+        # The joint limits defined in the URDF
+
+        self.URDF_specified_joint_limits = torch.deg2rad(
+            torch.tensor([
+                (-60, 60), 
+                (-60, 60),
+                (-60, 60), 
+                (-60, 60), 
+
+                (-200, 90), 
+                (-200, 90), 
+
+                (-260, 30), 
+                (-260, 30), 
+
+                (-156, -48), 
+                (-156, -48), 
+                (-156, -48), 
+                (-156, -48)
+            ])
+        )
+
+        # Joint limits I used while training
         self.joint_limits = torch.deg2rad(
             torch.tensor([
-                (-10, 10),
-                (-10, 10),
-                (-10, 10),
-                (-10, 10),
+                (-40, 40),
+                (-40, 40),
+                (-40, 40),
+                (-40, 40),
 
-                (10, 90),
-                (10, 90),
+                (-180, 70),
+                (-180, 70),
 
-                (20, 130),
-                (20, 130),
+                (-240, 20),
+                (-240, 20),
 
-                (-150, -50),
-                (-150, -50),
-                (-150, -50),
-                (-150, -50)
+                (-140, -40),
+                (-140, -40),
+                (-140, -40),
+                (-140, -40)
             ])
         )
 
@@ -523,6 +567,7 @@ class WalkENV(gym.Env):
         # Add history of observations
         # self.obs_histoy[:, :-self.num_obs] = self.obs_histoy[:, self.num_obs:].clone()
         # self.obs_histoy[:, -self.num_obs:] = current_obs
+
         return current_obs
 
     def _reset_idx(self, envs_idx):
