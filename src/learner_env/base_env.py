@@ -195,9 +195,10 @@ class WalkENV(gym.Env):
 
         self.__initial_positions = torch.deg2rad(
             torch.tensor([
-                0, 0, 0, 0, 46, 46, 57, 57, -86, -86, -86, -86
+                0, 0, 0, 0, 55, 55, 55, 55, -100, -100, -100, -100
             ])
         )
+        # The hip joints can be set between -90 to -125 for different height based movement and according to requirements.
 
         self.actions = torch.zeros((self.num_envs, 12), device=self.device)
         self.last_actions = torch.zeros_like(self.actions)
