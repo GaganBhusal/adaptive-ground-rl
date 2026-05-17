@@ -69,7 +69,6 @@ class WalkENV(gym.Env):
             gs.sensors.IMU(
                 entity_idx = self.robot.idx,
                 link_idx_local = self.robot.get_link("base").idx_local,
-                interpolate = True,
                 draw_debug = True
             )
         )
@@ -158,9 +157,10 @@ class WalkENV(gym.Env):
                 ),
             )
 
-        self.scene.build(n_envs = self.num_envs, env_spacing = (5.0, 5.0))
-
         self._get_internal_info()
+        self._setup_force_sensor()
+
+        self.scene.build(n_envs = self.num_envs, env_spacing = (5.0, 5.0))
         self.robot.set_dofs_kp(torch.tensor([40] * 12),dofs_idx_local = self.joints_local_idx)
         self.robot.set_dofs_kv(torch.tensor([1] * 12),dofs_idx_local = self.joints_local_idx)
         self.domainrandomizer = DomainRandomization(self.robot, self.num_envs, self.joints_local_idx)
@@ -195,7 +195,7 @@ class WalkENV(gym.Env):
 
         self.__initial_positions = torch.deg2rad(
             torch.tensor([
-                0, 0, 0, 0, 55, 55, 55, 55, -100, -100, -100, -100
+                0, 0, 0, 0, 50, 50, 55, 55, -90, -90, -90, -90
             ])
         )
         # The hip joints can be set between -90 to -125 for different height based movement and according to requirements.
@@ -300,6 +300,7 @@ class WalkENV(gym.Env):
             "torque_penalty": torch.zeros(self.num_envs, dtype=torch.float, device=self.device),
             "joint_vel_penalty" : torch.zeros(self.num_envs, dtype=torch.float, device=self.device),
             "out_of_range_penalty": torch.zeros(self.num_envs, dtype=torch.float, device=self.device),
+            "collision_penalty": torch.zeros(self.num_envs, dtype=torch.float, device=self.device),
             # "feet_air_time": torch.zeros(self.num_envs, dtype=torch.float, device=self.device),
             # "foot_slip_penalty": torch.zeros(self.num_envs, dtype=torch.float, device=self.device),
             # "swing_phase_penalty": torch.zeros(self.num_envs, dtype=torch.float, device=self.device),
@@ -309,6 +310,19 @@ class WalkENV(gym.Env):
             "reward_survival" : torch.zeros(self.num_envs, dtype=torch.float, device=self.device),
             "Reward_Per_Environment": torch.zeros(self.num_envs, dtype=torch.float, device=self.device),
         }
+    def _setup_force_sensor(self):
+        self.contact_sensors = []
+        for idx in range(13):
+            contact_sensor = self.scene.add_sensor(
+                gs.sensors.ContactForce(
+                    entity_idx=self.robot.idx,
+                    link_idx_local=idx,
+                    min_force = 1.0,
+                    draw_debug = True,
+                )
+            )
+            self.contact_sensors.append(contact_sensor)
+
 
     def __get_linear_velocity(self):
         vel_body = self.robot.get_link("base").get_vel()
@@ -323,9 +337,13 @@ class WalkENV(gym.Env):
             for joint in joints:
                 print(f"Joint name: {joint.name}, local index: {joint.dof_idx_local}")
                 self.joints_local_idx.append(joint.dof_idx_local)
+                
+
 
     def _get_imu_values(self):
-        linear_acceleration, _angular_vel = self.imu.read()
+        imu_value = self.imu.read()
+        linear_acceleration, _angular_vel, magnetometer = self.imu.read()
+
         return linear_acceleration, _angular_vel
 
     def _get_ypr(self):
@@ -334,6 +352,13 @@ class WalkENV(gym.Env):
         rotation = Rotation.from_quat(quat_xyzw.detach().cpu().numpy())
         euler_angles = rotation.as_euler("xyz")
         return torch.tensor(np.array(euler_angles), dtype=torch.float)
+
+    def _get_collision_forces(self):
+        collision_forces = []
+        for sensor in self.contact_sensors[:-4]:
+            contact_forces = sensor.read()
+            collision_forces.append(contact_forces.norm(dim=-1))
+        return torch.stack(collision_forces, dim=1)
 
     def _calculate_projected_acceleration(self):
         quat = self.robot.get_link("base").get_quat()
@@ -392,7 +417,8 @@ class WalkENV(gym.Env):
         foot_xy_vel_penalty = torch.square(foot_velocities[:, :, 0] - self.custom_commands[:, 0].unsqueeze(1) * 2.0) + torch.square(foot_velocities[:, :, 1] - torch.zeros_like(self.custom_commands[:, 0]).unsqueeze(1))
         # print(swing_phase[0])
 
-        
+        collision_forces = self._get_collision_forces()
+                
         # Rewards and Penalty for Custom Commands
         reward_for_tracking_vx = torch.exp(-torch.square(self.custom_commands[:, 0] - vx) / self.sigma)
         reward_for_tracking_wz = torch.exp(-torch.square(self.custom_commands[:, 1] - wz) / self.sigma)
@@ -408,19 +434,21 @@ class WalkENV(gym.Env):
         torque_penalty = torch.sum(torch.square(torques), dim=1)
         joint_vel_penalty = torch.sum(torch.square(dof_vel), dim=1)
         out_of_range_penalty = torch.sum((dof_pos < self.joint_limits[:, 0]) | (dof_pos > self.joint_limits[:, 1]), dim=1)
-        reward_feet_air_time = torch.sum(torch.exp(-torch.square(self.feet_air_time - target_air_time) / (0.1)) * first_contact, dim=1)
-        foot_slip_penalty = torch.sum(torch.square(foot_velocities[:, :, :2]) * contact.unsqueeze(-1), dim=[1, 2])
+        collision_penalty = (collision_forces > 1.0).any(dim=-1)
+        
+        # reward_feet_air_time = torch.sum(torch.exp(-torch.square(self.feet_air_time - target_air_time) / (0.1)) * first_contact, dim=1)
+        # foot_slip_penalty = torch.sum(torch.square(foot_velocities[:, :, :2]) * contact.unsqueeze(-1), dim=[1, 2])
 
-        swing_phase_penalty = torch.sum(torch.square(foot_forces_z * swing_phase.float()), dim=1)
-        stance_phase_penalty = torch.sum(torch.square(foot_velocities[:, :, :2] * stance_phase.unsqueeze(-1).float()), dim=[1, 2])
-        foot_swing_height_penalty = torch.sum(torch.square(target_z - (foot_position_z - 0.21)), dim=1)
-        raibert_penalty = torch.sum(foot_xy_vel_penalty * swing_phase.float(), dim=1)
+        # swing_phase_penalty = torch.sum(torch.square(foot_forces_z * swing_phase.float()), dim=1)
+        # stance_phase_penalty = torch.sum(torch.square(foot_velocities[:, :, :2] * stance_phase.unsqueeze(-1).float()), dim=[1, 2])
+        # foot_swing_height_penalty = torch.sum(torch.square(target_z - (foot_position_z - 0.21)), dim=1)
+        # raibert_penalty = torch.sum(foot_xy_vel_penalty * swing_phase.float(), dim=1)
 
         # print(
         #     reward_for_tracking_vx.shape,
         #     reward_for_tracking_wz.shape,
         #     height_penalty.shape,
-        #     pitch_penalty.shape,
+        #     # pitch_penalty.shape,
         #     lin_vel_z_penalty.shape,
         #     roll_pitch_velocity_penalty.shape,
         #     action_rate_penalty.shape,
@@ -429,12 +457,13 @@ class WalkENV(gym.Env):
         #     torque_penalty.shape,
         #     joint_vel_penalty.shape,
         #     out_of_range_penalty.shape,
-        #     reward_feet_air_time.shape,
-        #     foot_slip_penalty.shape,
-        #     swing_phase_penalty.shape,
-        #     stance_phase_penalty.shape,
-        #     foot_swing_height_penalty.shape,
-        #     raibert_penalty.shape
+        #     collision_penalty.shape,
+            # reward_feet_air_time.shape,
+            # foot_slip_penalty.shape,
+            # swing_phase_penalty.shape,
+            # stance_phase_penalty.shape,
+            # foot_swing_height_penalty.shape,
+            # raibert_penalty.shape
         # )
 
         self.feet_air_time += self.dt       
@@ -452,14 +481,15 @@ class WalkENV(gym.Env):
         torque_penalty = - 0.001 * torque_penalty
         joint_vel_penalty = - 0.005 * joint_vel_penalty
         out_of_range_penalty = - 0.5 * out_of_range_penalty
-        reward_feet_air_time = + 1.0 * reward_feet_air_time
-        foot_slip_penalty = - 5 * foot_slip_penalty
-        swing_phase_penalty = - 0.05 * swing_phase_penalty
-        stance_phase_penalty = -0.5 * stance_phase_penalty
-        foot_swing_height_penalty = - 5.0 * foot_swing_height_penalty
-        raibert_penalty = -0.5 * raibert_penalty
-        reward_survival = torch.ones_like(base_height) * 1.0
+        collision_penalty = - 1.0 * collision_penalty
 
+        # reward_feet_air_time = + 1.0 * reward_feet_air_time
+        # foot_slip_penalty = - 5 * foot_slip_penalty
+        # swing_phase_penalty = - 0.05 * swing_phase_penalty
+        # stance_phase_penalty = -0.5 * stance_phase_penalty
+        # foot_swing_height_penalty = - 5.0 * foot_swing_height_penalty
+        # raibert_penalty = -0.5 * raibert_penalty
+        reward_survival = torch.ones_like(base_height) * 1.0
 
         reward = (
             reward_for_tracking_vx
@@ -474,6 +504,7 @@ class WalkENV(gym.Env):
             + torque_penalty
             + joint_vel_penalty
             + out_of_range_penalty
+            + collision_penalty
             # + reward_feet_air_time
             # + foot_slip_penalty
             # + swing_phase_penalty
@@ -485,7 +516,7 @@ class WalkENV(gym.Env):
 
 
         euler = self._quat_to_euler(base_quat)
-        terminated = ((torch.abs(euler[:, 0]) > 0.5) | (torch.abs(euler[:, 1]) > 0.5) | (base_height < 0.05))
+        terminated = ((torch.abs(euler[:, 0]) > 0.5) | (torch.abs(euler[:, 1]) > 0.5) | (base_height < 0.18))
         # out_of_trajectory = (base_x_pos < 0.5) | (base_x_pos > self.terrain_length-0.5) | (base_y_pos < 0.5) | (base_y_pos > self.terrain_breadth - 0.5)
         out_of_trajectory = False
         reward[terminated] -= 500
@@ -503,6 +534,7 @@ class WalkENV(gym.Env):
         self.episode_sums["torque_penalty"] += torque_penalty
         self.episode_sums["joint_vel_penalty"] += joint_vel_penalty
         self.episode_sums["out_of_range_penalty"] += out_of_range_penalty
+        self.episode_sums["collision_penalty"] += collision_penalty
         # self.episode_sums["feet_air_time"] += reward_feet_air_time
         # self.episode_sums["foot_slip_penalty"] += foot_slip_penalty
         # self.episode_sums["swing_phase_penalty"] += swing_phase_penalty
@@ -548,7 +580,7 @@ class WalkENV(gym.Env):
         ], dim=1)
 
         _, depth_img, _, _ = self.cam_forward.render(depth=True)
-        print(torch.tensor(depth_img, dtype=torch.float32).unsqueeze(1).shape)
+        # print(torch.tensor(depth_img, dtype=torch.float32).unsqueeze(1).shape)
 
         current_obs = TensorDict({          
             "policy": torch.cat([
@@ -563,7 +595,7 @@ class WalkENV(gym.Env):
             "image": torch.tensor(depth_img, dtype=torch.float32).unsqueeze(1) # n_envs x 1 x 64 x 64
         }, batch_size=self.num_envs, device=self.device)
 
-        print(current_obs["image"].shape)
+        # print(current_obs["image"].shape)
 
         # Add history of observations
         # self.obs_histoy[:, :-self.num_obs] = self.obs_histoy[:, self.num_obs:].clone()
@@ -688,7 +720,7 @@ class WalkENV(gym.Env):
 
         self.update_cam()
         self.extras["camera"] = self.cam_forward.render(depth = True)
-    
+
         return observation, reward, dones, self.extras   
 
     def _quat_to_euler(self, q):
