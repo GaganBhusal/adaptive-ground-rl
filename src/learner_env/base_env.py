@@ -1,5 +1,4 @@
 import math
-
 import genesis as gs
 import torch
 import numpy as np
@@ -62,7 +61,7 @@ class WalkENV(gym.Env):
             plane = self.scene.add_entity(gs.morphs.Plane())
         
         self.robot = self.scene.add_entity(
-            gs.morphs.URDF(file='/home/yayy/My/Codeeeeee/Simulators/Genesis/genesis/assets/urdf/go2/urdf/go2.urdf'),
+            gs.morphs.URDF(file='//home/yayy/My/Codeeeeee/Simulators/Genesis/genesis-world/genesis/assets/urdf/go2/urdf/go2.urdf'),
         )
 
         self.imu = self.scene.add_sensor(
@@ -91,11 +90,11 @@ class WalkENV(gym.Env):
 
         # Adding Camera
         self.cam_forward = self.scene.add_camera(
-            res=(64, 64),
+            res=(640, 480),
             pos=(0, 0.0, 0),
             lookat=(10, 0, 0),
             fov=120,
-            GUI=False,
+            GUI=True,
             near = 0.01,
         )
         
@@ -662,7 +661,9 @@ class WalkENV(gym.Env):
         self.cam_forward.attach(base_link, self.offset_T_forward)
         self.cam_forward.move_to_attach()
 
-        self.depth_img, seg, col_seg, normal = self.cam_forward.render(rgb=False, depth=True, segmentation=False, colorize_seg=False, normal=False) 
+        _, self.depth_img, _, _, _ = self.cam_forward.render(rgb=False, depth=True, segmentation=False, colorize_seg=False, normal=False) 
+
+
 
     def reset(self):
         all_idx = torch.arange(self.num_envs, device=self.device)
